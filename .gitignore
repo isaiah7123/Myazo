@@ -1,0 +1,9 @@
+# build output - ship the exe through GitHub Releases, not the repo
+dist/
+build/
+*.spec
+*.exe
+.venv/
+__pycache__/
+*.pyc
+app.ico

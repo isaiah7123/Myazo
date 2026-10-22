@@ -1,0 +1,24 @@
+# Optional: builds Myazo.exe on GitHub's servers and attaches it to a Release whenever you push a tag like v1.0.0
+name: Build release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller
+      - run: python icon.py
+      - run: pyinstaller --noconfirm --noconsole --onefile --name Myazo --icon app.ico --collect-all imageio_ffmpeg --collect-all soundcard main.py
+      - run: (Get-FileHash dist\Myazo.exe -Algorithm SHA256).Hash | Out-File dist\Myazo.exe.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Myazo.exe
+            dist/Myazo.exe.sha256
