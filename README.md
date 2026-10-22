@@ -87,7 +87,7 @@ If a shortcut doesn't work, right-click the tray icon and choose **Open diagnost
 Requires Windows 10/11 and Python 3.11 or 3.12.
 
 ```
-git clone <this-repo>
+git clone https://github.com/isaiah7123/Myazo.git
 cd Myazo
 build.bat
 ```
