@@ -288,7 +288,7 @@ class SnapApp(QObject):
             self.lib.show_item(path)
 
     def handle_message(self, msg):
-        """Messages from a second launch or from a notification button (myazo://open?file=...&with=app|default)."""
+        """Messages from a second launch or from a notification button (myazo://open?file=...&with=app|default|copy)."""
         if not msg.lower().startswith("myazo:"):
             return self.lib.show_front()
         q = parse_qs(urlparse(msg).query)
@@ -299,7 +299,13 @@ class SnapApp(QObject):
             return log(f"ignored link: {msg}")
         if f.suffix.lower() not in IMG | VID or not f.is_file():
             return
-        if q.get("with", ["app"])[0] == "default":
+        mode = q.get("with", ["app"])[0]
+        if mode == "copy":  # toast button: copy the screenshot itself, without opening any window
+            if f.suffix.lower() in IMG:
+                self.copy_path(str(f), "image")
+                self.notify("Screenshot copied to clipboard")
+            return
+        if mode == "default":
             open_default(str(f))
         else:
             self.lib.show_item(str(f))

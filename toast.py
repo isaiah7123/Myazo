@@ -37,19 +37,21 @@ def register(icon_png):
 
 
 def show_saved(path, title, with_image, on_fail):
-    """Shows a Windows toast with 'Open in Myazo' / 'Open in default app' buttons (runs in the background)."""
+    """Shows a Windows toast with 'Open in Myazo' / 'Open in default app' buttons (plus 'Copy to clipboard' for images) (runs in the background)."""
     p = Path(path)
 
     def uri(mode):
         return f"{SCHEME}://open?file={quote(str(p), safe='')}&with={mode}"
 
+    copy_btn = (f'<action content="Copy to clipboard" arguments={quoteattr(uri("copy"))} activationType="protocol"/>'
+                if with_image else "")  # videos keep the original two buttons
     img = (f'<image placement="appLogoOverride" src={quoteattr(p.as_uri())}/>' if with_image else "")
     xml = (f'<toast launch={quoteattr(uri("app"))} activationType="protocol">'
            f'<visual><binding template="ToastGeneric"><text>{escape(title)}</text><text>{escape(p.name)}</text>'
            f'{img}</binding></visual><actions>'
            f'<action content="Open in {APP}" arguments={quoteattr(uri("app"))} activationType="protocol"/>'
            f'<action content="Open in default app" arguments={quoteattr(uri("default"))} activationType="protocol"/>'
-           f'</actions><audio silent="true"/></toast>')
+           f'{copy_btn}</actions><audio silent="true"/></toast>')
     ps = ("$ErrorActionPreference = 'Stop'\n"
           "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null\n"
           "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null\n"
