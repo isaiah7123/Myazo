@@ -4,27 +4,25 @@ import subprocess
 from ctypes import wintypes
 from pathlib import Path
 
-import cv2
 from PySide6.QtCore import QFileSystemWatcher, QPoint, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (QColor, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPen,
                            QPixmap, QPolygon, QShortcut)
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
                                QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider, QToolBar,
                                QVBoxLayout, QWidget)
 
-from config import APP
+from config import APP, IMG, VID
 from icon import make_icon
 import ocr
+from lazy import lazy
+from log import log
 
 try:
     from send2trash import send2trash
 except Exception:  # pragma: no cover
     send2trash = None
 
-IMG = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
-VID = {".mp4", ".mkv", ".webm", ".mov"}
+cv2 = lazy("cv2")  # only loaded when a video thumbnail or frame is actually needed
 TW, TH = 220, 140
 
 
@@ -65,8 +63,11 @@ class ThumbWorker(QThread):
 
     def run(self):
         self.cache.mkdir(parents=True, exist_ok=True)
-        try:
-            ctypes.windll.kernel32.SetFileAttributesW(str(self.cache.parent), 2)  # hide the metadata folder
+        try:  # hide the metadata folder, but only if it isn't hidden yet (re-setting it would touch the media folder)
+            k32, d = ctypes.windll.kernel32, str(self.cache.parent)
+            a = k32.GetFileAttributesW(d)
+            if a != 0xFFFFFFFF and not a & 2:
+                k32.SetFileAttributesW(d, a | 2)
         except Exception:
             pass
         for p in self.paths:
@@ -241,6 +242,8 @@ class Viewer(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
 
         if self.is_video:
+            from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # loaded only when a video is opened
+            from PySide6.QtMultimediaWidgets import QVideoWidget
             target = QVideoWidget()
             lay.addWidget(target, 1)
             self.player = QMediaPlayer(self)
@@ -399,6 +402,7 @@ class Viewer(QWidget):
 
     # ---------- playback ----------
     def _toggle(self):
+        from PySide6.QtMultimedia import QMediaPlayer
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
             self.btn.setText("Play")
@@ -491,6 +495,7 @@ class Library(QMainWindow):
         self.debounce.timeout.connect(self._do_refresh)
         self.search.textChanged.connect(lambda _: self.debounce.start())
         self.kind.currentIndexChanged.connect(lambda _: self.debounce.start())
+        self._sig = None  # what the grid currently shows; identical rebuild requests are skipped
         self.fsw = QFileSystemWatcher(self)
         self.fsw.directoryChanged.connect(lambda _: self.debounce.start())
         self.set_folder()
@@ -520,12 +525,14 @@ class Library(QMainWindow):
 
     def hard_refresh(self):
         self.icons.clear()
+        self._sig = None
         self.refresh()
 
     def set_folder(self):
         if self.fsw.directories():
             self.fsw.removePaths(self.fsw.directories())
         self.fsw.addPath(str(self.st.storage()))
+        self._sig = None
         self.refresh()
 
     def showEvent(self, e):
@@ -554,6 +561,12 @@ class Library(QMainWindow):
         keyf = {"date": lambda t: t[2], "name": lambda t: t[0].name.lower(),
                 "type": lambda t: (t[0].suffix.lower(), t[0].name.lower())}[self.sort.currentData()]
         files.sort(key=keyf, reverse=bool(self.st["sort_desc"]))
+        sig = (q, k, self.sort.currentData(), bool(self.st["sort_desc"]), len(idx),
+               tuple((str(p), mt) for p, mt, _c in files))
+        if sig == self._sig:  # nothing visible changed (e.g. a folder-watcher ping): don't rebuild the grid
+            return
+        self._sig = sig
+        log(f"library rebuilt ({len(files)} files)")
 
         self.lst.setUpdatesEnabled(False)
         try:
@@ -684,6 +697,7 @@ class Library(QMainWindow):
         if self.st["keep_in_tray"]:
             e.ignore()
             self.hide()
+            self.app.trim_later()
         else:
             self.app.quit()
             e.accept()

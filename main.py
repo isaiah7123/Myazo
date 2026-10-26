@@ -13,16 +13,45 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from capture import RegionPicker, active_window_rect, grab, screen_under_cursor, to_physical
-from config import APP, CFG_DIR, HOTKEYS, Settings
+from config import APP, CFG_DIR, HOTKEYS, IMG, VID, Settings
 from hotkeys import HotkeyManager
 from hud import RecordHUD
 from icon import make_icon, make_pixmap
-from library import IMG, VID, Library, open_default
 from ocr import ocr_async
 from recorder import Recorder, ReplayBuffer
-from settings_dialog import SettingsDialog
 from log import LOG, install_excepthooks, log
 from toast import register as register_integration, show_saved
+
+def trim_memory():
+    """Release the working set (pages Windows can reload on demand). Keeps the idle tray process small."""
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        ctypes.windll.psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+        ctypes.windll.psapi.EmptyWorkingSet(k32.GetCurrentProcess())
+    except Exception:
+        pass
+
+
+def hide_child_consoles():
+    """The windowed exe has no console of its own, so any console program it starts (Tesseract, PowerShell,
+    ffmpeg...) would otherwise flash a command-prompt window. Make every child process start without one.
+    Also records each launch in the log so a stray window can be traced."""
+    import subprocess
+    orig = subprocess.Popen.__init__
+
+    def init(self, args, *a, **kw):
+        if not kw.get("creationflags", 0) & (0x08 | 0x10):  # leave DETACHED_PROCESS / CREATE_NEW_CONSOLE alone
+            kw["creationflags"] = kw.get("creationflags", 0) | 0x08000000  # CREATE_NO_WINDOW (harmless for GUI apps)
+        try:
+            first = args if isinstance(args, str) else (args[0] if args else "")
+            log(f"starting process: {str(first)[:90]}")
+        except Exception:
+            pass
+        orig(self, args, *a, **kw)
+
+    subprocess.Popen.__init__ = init
+
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -59,7 +88,9 @@ class SnapApp(QObject):
         self.replay = ReplayBuffer(self.st)
         self.replay.saved.connect(lambda p: self.finish(p, False))
         self.replay.failed.connect(lambda m: self.notify(m))
-        self.lib = Library(self)
+        self._lib = None  # the library window is built the first time it's needed, not at start-up
+        self._trim = QTimer(self, singleShot=True, interval=6000)
+        self._trim.timeout.connect(trim_memory)
         self.picker.picked.connect(lambda s, r, p: self._cb and self._cb(s, r, p))
         self.picker.cancelled.connect(lambda: setattr(self, "_cb", None))
 
@@ -83,6 +114,17 @@ class SnapApp(QObject):
         self.hk.triggered.connect(self.on_hotkey)
         self.hk.failed.connect(lambda n: self.notify(f"Couldn't claim the shortcut for “{n}” — another app is using it. Pick a different combination in Settings."))
         self.apply_settings(first=True)
+
+    @property
+    def lib(self):
+        if self._lib is None:
+            from library import Library
+            self._lib = Library(self)
+        return self._lib
+
+    def trim_later(self):
+        """Hand back memory Windows is holding for us once things have gone quiet."""
+        self._trim.start()
 
     # ---------- plumbing ----------
     def later(self, fn, ms=250):
@@ -112,7 +154,8 @@ class SnapApp(QObject):
             set_startup(self.st["start_with_windows"])
         except OSError:
             pass
-        self.lib.set_folder()
+        if self._lib:
+            self._lib.set_folder()
         if self.replay.running:
             self.replay.stop()
             self.replay.start()
@@ -122,7 +165,8 @@ class SnapApp(QObject):
 
     def open_settings(self):
         self.hk.stop()  # so the shortcut editors can record keys already registered globally
-        SettingsDialog(self.st, self.lib if self.lib.isVisible() else None).exec()
+        from settings_dialog import SettingsDialog
+        SettingsDialog(self.st, self._lib if self._lib and self._lib.isVisible() else None).exec()
         self.apply_settings()
 
     def build_menu(self):
@@ -283,9 +327,11 @@ class SnapApp(QObject):
             p, is_img = Path(path), Path(path).suffix.lower() in IMG
             title = "Screenshot saved" if is_img else ("Replay saved" if p.name.startswith("Replay") else "Recording saved")
             show_saved(path, title, is_img, lambda: self.toast_failed.emit(f"{title}: {p.name}"))
-        self.lib.refresh()
+        if self._lib:
+            self._lib.refresh()
         if open_after:
             self.lib.show_item(path)
+        self.trim_later()
 
     def handle_message(self, msg):
         """Messages from a second launch or from a notification button (myazo://open?file=...&with=app|default|copy)."""
@@ -306,13 +352,14 @@ class SnapApp(QObject):
                 self.notify("Screenshot copied to clipboard")
             return
         if mode == "default":
-            open_default(str(f))
+            os.startfile(str(f))
         else:
             self.lib.show_item(str(f))
 
 
 def main():
     install_excepthooks()
+    hide_child_consoles()
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Myazo.App")
     qa = QApplication(sys.argv)
     qa.setApplicationName(APP)
@@ -346,6 +393,7 @@ def main():
             read()
 
     srv.newConnection.connect(on_conn)
+    app.trim_later()  # shrink once start-up is done
     if url:
         app.handle_message(url)
     elif "--tray" not in sys.argv:

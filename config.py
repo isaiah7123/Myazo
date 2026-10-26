@@ -8,6 +8,9 @@ CFG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP
 CFG_FILE = CFG_DIR / "settings.json"
 OLD_CFG = Path(os.environ.get("APPDATA", str(Path.home()))) / "Snapkeep" / "settings.json"
 
+IMG = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+VID = {".mp4", ".mkv", ".webm", ".mov"}
+
 # (id, label, default "capture in background", default "open in app")
 HOTKEYS = [
     ("image", "Capture image", "Ctrl+Shift+C", "Ctrl+Alt+Shift+C"),
@@ -62,8 +65,24 @@ class Settings:
                 shutil.copy2(OLD_CFG, CFG_FILE)
             except OSError:
                 pass
+        if not CFG_FILE.exists():  # first run after the installer: adopt the folders/options chosen there
+            self._seed_from_installer()
         try:
             self.d.update(json.loads(CFG_FILE.read_text("utf-8")))
+        except Exception:
+            pass
+
+    def _seed_from_installer(self):
+        import sys
+        try:
+            f = Path(sys.executable).parent / "install-config.json"
+            if getattr(sys, "frozen", False) and f.exists():
+                raw = f.read_bytes()  # the installer writes UTF-16 (with BOM) so non-English folder names survive
+                text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+                seed = {k: v for k, v in json.loads(text).items() if k in DEFAULTS}
+                if seed:
+                    CFG_DIR.mkdir(parents=True, exist_ok=True)
+                    CFG_FILE.write_text(json.dumps({**DEFAULTS, **seed}, indent=2), "utf-8")
         except Exception:
             pass
 

@@ -1,10 +1,14 @@
 import ctypes
+import importlib
+import threading
 from ctypes import wintypes
 
 import mss
 from PySide6.QtCore import QObject, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
+
+from log import log
 
 user32 = ctypes.windll.user32
 dwm = ctypes.windll.dwmapi
@@ -29,9 +33,38 @@ def to_physical(screen, r=None):
             "width": round(r.width() * dpr), "height": round(r.height() * dpr)}
 
 
+_blt_lock = threading.Lock()
+_CAPTUREBLT = 0x40000000
+
+
+def _find_blt_module():
+    """mss keeps its CAPTUREBLT flag in mss.windows.gdi (10.x) or mss.windows (9.x); find whichever has it."""
+    for name in ("mss.windows.gdi", "mss.windows"):
+        try:
+            m = importlib.import_module(name)
+            if hasattr(m, "CAPTUREBLT"):
+                return m
+        except Exception:
+            pass
+    return None
+
+
+_blt_mod = _find_blt_module()
+log(f"mss {getattr(mss, '__version__', '?')}: CAPTUREBLT flag " + ("found" if _blt_mod else "NOT found (cursor may flicker during recording)"))
+
+
+def grab_with(sct, mon, layered):
+    """One screen grab. `layered` includes translucent windows (right for a single screenshot) but makes the
+    mouse cursor flicker if repeated many times a second, so recording and the replay buffer pass False."""
+    with _blt_lock:  # mss reads this flag from a module global, so keep screenshots and recordings from racing
+        if _blt_mod is not None:
+            _blt_mod.CAPTUREBLT = _CAPTUREBLT if layered else 0
+        return sct.grab(mon)
+
+
 def grab(mon):
     with mss.mss() as s:
-        sh = s.grab(mon)
+        sh = grab_with(s, mon, True)
         return QImage(sh.bgra, sh.width, sh.height, sh.width * 4, QImage.Format_RGB32).copy()
 
 

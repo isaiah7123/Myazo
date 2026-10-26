@@ -61,24 +61,27 @@ Press `Esc` to cancel a region selection. Press a record shortcut again (or clic
 
 ## Getting started
 
-### Download and run
+### Install
 
-1. Go to the [latest release](../../releases/latest) and download **Myazo.exe** under **Assets**.
-2. Save it somewhere permanent, such as `C:\Users\<you>\Apps\Myazo\`. Myazo is a single file with nothing to install, and no Python is needed. If you turn on "launch with Windows", the startup entry points to wherever the exe is, so don't move it afterwards.
-3. Double-click `Myazo.exe`. The first launch can take a few seconds.
-4. **If Windows shows "Windows protected your PC":** Myazo isn't code-signed, so SmartScreen warns about every new unsigned app. Click **More info**, then **Run anyway**. You only need to do this once.
-5. Look for the Myazo icon in the system tray at the bottom right of the taskbar. If you don't see it, click the **^** arrow to show hidden icons. Right-click the icon to reach the library and settings.
-6. Open **Settings** and choose the folder where your screenshots and videos will be saved. Then press `Ctrl+Shift+C`, drag a box over part of your screen, and release. The capture appears in your folder and in the library.
+1. Go to the [latest release](../../releases/latest) and download **Myazo-Setup.exe** under **Assets**.
+2. Run it. If Windows shows "Windows protected your PC", Myazo isn't code-signed, so SmartScreen warns about every new unsigned app. Click **More info**, then **Run anyway**.
+3. The installer asks two questions on one page, and each has a default you can accept or change:
+   - **Install folder:** default `C:\Program Files\Myazo`, or pick your own (a `Myazo` subfolder is added so uninstalling can never touch other files).
+   - **Media folder:** where screenshots and videos are saved. Default is `Pictures\Myazo`, or pick your own, for example on another drive.
+4. Choose whether Myazo starts with Windows and whether to add a desktop shortcut, then finish. A Start menu shortcut is always added.
+5. Look for the Myazo icon in the system tray at the bottom right of the taskbar (click the **^** arrow if it's hidden). Press `Ctrl+Shift+C`, drag a box over part of your screen and release. The capture appears in your media folder and in the library.
 
-**Optional: verify the download.** Each release includes `Myazo.exe.sha256`. In PowerShell, run the following and check that the output matches the checksum on the release page:
+**Optional: verify the download.** Each release includes `Myazo-Setup.exe.sha256`. In PowerShell, run the following and check that the output matches:
 
 ```
-Get-FileHash .\Myazo.exe -Algorithm SHA256
+Get-FileHash .\Myazo-Setup.exe -Algorithm SHA256
 ```
 
-**Updating:** download the new `Myazo.exe` and replace the old one. Your settings and media are stored separately and are kept.
+**Silent install** (for scripts): `Myazo-Setup.exe /S /D=D:\Apps\Myazo /MEDIADIR="D:\Captures"`. Both options are optional. `/D=` must be the last argument and unquoted.
 
-**Uninstalling:** quit Myazo from the tray menu and delete `Myazo.exe`. To remove everything, also delete `%APPDATA%\Myazo` and your media folder. See [Your data](#your-data).
+**Updating:** run the new `Myazo-Setup.exe`. It replaces the program and keeps your settings and media folder.
+
+**Uninstalling:** use **Settings > Apps > Installed apps > Myazo**. It asks whether to also remove your settings. Your screenshots and videos are never deleted.
 
 If a shortcut doesn't work, right-click the tray icon and choose **Open diagnostics log**. It shows which shortcuts Myazo registered and any errors.
 
@@ -92,7 +95,9 @@ cd Myazo
 build.bat
 ```
 
-The result is `dist\Myazo.exe`. To run without building, use `run.bat`.
+The result is `dist\Myazo\Myazo.exe` (keep the whole folder together). To run without building, use `run.bat`.
+
+To also build the installer, install [NSIS](https://nsis.sourceforge.io/Download) (`winget install NSIS.NSIS`), then run `build_installer.bat 1.2.0`. The result is `dist\Myazo-Setup.exe`.
 
 ### Optional: text selection (OCR)
 
@@ -109,17 +114,25 @@ Install [Tesseract for Windows](https://github.com/UB-Mannheim/tesseract/wiki) (
 
 Nothing leaves your machine. Deleting the media folder and `%APPDATA%\Myazo` removes everything Myazo has stored.
 
+## Light on your PC
+
+Myazo is built to sit in the tray without costing you anything:
+- It does no polling or background work while idle, so it uses no CPU until you press a shortcut.
+- Heavy components (video, OCR, the video player) load only the first time you use them, and the library window is created only when you open it.
+- It hands unused memory back to Windows after start-up, after a capture, and when you close the library.
+- The app starts directly from its install folder. It doesn't unpack itself to a temp folder on every launch.
+
 ## What Myazo doesn't do
 
 Because it's local-only by design, there are no share links, cloud storage, accounts, browser extension, or built-in annotation tools. If you want to share a capture, copy it or send the file yourself.
 
 ## Tech
 
-Python with PySide6 (Qt 6) for the interface, `mss` for screen capture, OpenCV and ffmpeg (bundled via `imageio-ffmpeg`) for video, `soundcard` for system and microphone audio, and Tesseract (optional) for OCR. Shortcuts use the Win32 API through `ctypes`. Builds are packaged with PyInstaller.
+Python with PySide6 (Qt 6) for the interface, `mss` for screen capture, OpenCV and ffmpeg (bundled via `imageio-ffmpeg`) for video, `soundcard` for system and microphone audio, and Tesseract (optional) for OCR. Shortcuts use the Win32 API through `ctypes`. Builds are packaged with PyInstaller, and the installer is built with NSIS.
 
 ## Known limitations
 
 - Windows only. Built and aimed at Windows 11.
 - Region capture works within one monitor and can't span two.
 - Shortcuts won't fire while an app running as administrator has focus.
-- The exe isn't code-signed, so Windows SmartScreen may warn the first time you run it.
+- The installer and exe aren't code-signed, so Windows SmartScreen may warn the first time you run them.

@@ -10,19 +10,32 @@ import wave
 from ctypes import wintypes
 from pathlib import Path
 
-import cv2
-import imageio_ffmpeg
 import mss
-import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+from capture import grab_with
+from lazy import lazy
+
+cv2 = lazy("cv2")
+np = lazy("numpy")
+
+_ffmpeg_path = None
+
+
+def ffmpeg_exe():
+    global _ffmpeg_path
+    if _ffmpeg_path is None:
+        import imageio_ffmpeg
+        _ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    return _ffmpeg_path
+
+
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 RATE = 48000
 
 
 def run_ff(args):
-    return subprocess.run([FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *args],
+    return subprocess.run([ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", *args],
                           creationflags=NOWIN, capture_output=True)
 
 
@@ -65,7 +78,7 @@ class CURSORINFO(ctypes.Structure):
                 ("hCursor", wintypes.HANDLE), ("pt", wintypes.POINT)]
 
 
-_ARROW = np.array([(0, 0), (0, 16), (4, 12), (7, 19), (10, 18), (7, 11), (12, 11)], np.int32)
+_ARROW_PTS = [(0, 0), (0, 16), (4, 12), (7, 19), (10, 18), (7, 11), (12, 11)]
 
 
 def draw_cursor(f, m):
@@ -74,13 +87,13 @@ def draw_cursor(f, m):
     if ctypes.windll.user32.GetCursorInfo(ctypes.byref(ci)) and ci.flags & 1:
         x, y = ci.pt.x - m["left"], ci.pt.y - m["top"]
         if 0 <= x < f.shape[1] and 0 <= y < f.shape[0]:
-            pts = _ARROW + (x, y)
+            pts = np.array(_ARROW_PTS, np.int32) + (x, y)
             cv2.fillPoly(f, [pts], (255, 255, 255))
             cv2.polylines(f, [pts], True, (0, 0, 0), 1, cv2.LINE_AA)
 
 
 def grab_frame(sct, m, ow, oh):
-    f = np.ascontiguousarray(np.asarray(sct.grab(m))[:, :, :3])
+    f = np.ascontiguousarray(np.asarray(grab_with(sct, m, False))[:, :, :3])
     draw_cursor(f, m)
     if f.shape[1] != ow or f.shape[0] != oh:
         f = cv2.resize(f, (ow, oh), interpolation=cv2.INTER_AREA)
@@ -202,7 +215,7 @@ class Recorder(QObject):
                     a.start()
                     audio.append(a)
             ff = subprocess.Popen(
-                [FFMPEG, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                [ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
                  "-s", f"{ow}x{oh}", "-r", str(fps), "-i", "-", "-an", "-c:v", "libx264",
                  "-preset", "ultrafast", "-crf", "21", "-pix_fmt", "yuv420p", vid],
                 stdin=subprocess.PIPE, creationflags=NOWIN)
@@ -308,7 +321,7 @@ class ReplayBuffer(QObject):
             fps = (len(items) - 1) / span
             vid = os.path.join(tmpd, "v.mp4")
             ff = subprocess.Popen(
-                [FFMPEG, "-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", f"{fps:.3f}",
+                [ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "image2pipe", "-framerate", f"{fps:.3f}",
                  "-i", "-", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p", vid],
                 stdin=subprocess.PIPE, creationflags=NOWIN)
             for _, b in items:
