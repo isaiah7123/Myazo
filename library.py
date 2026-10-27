@@ -2,20 +2,23 @@ import ctypes
 import os
 import subprocess
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QFileSystemWatcher, QPoint, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import (QColor, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPen,
-                           QPixmap, QPolygon, QShortcut)
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSlider, QToolBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QFileSystemWatcher, QPointF, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence,
+                           QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QShortcut)
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListView,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton, QSizePolicy,
+                               QSlider, QStyle, QStyledItemDelegate, QVBoxLayout, QWidget)
 
+import ocr
+import theme
 from config import APP, IMG, VID
 from icon import make_icon
-import ocr
 from lazy import lazy
 from log import log
+from theme import PAL
 
 try:
     from send2trash import send2trash
@@ -23,7 +26,8 @@ except Exception:  # pragma: no cover
     send2trash = None
 
 cv2 = lazy("cv2")  # only loaded when a video thumbnail or frame is actually needed
-TW, TH = 220, 140
+GAP, PAD, INFO_H, RATIO, MIN_CELL = 20, 10, 66, 0.65, 270  # card grid metrics (px)
+THUMB = (420, 280)  # largest stored thumbnail
 
 
 # ---------- shell helpers shared by the grid menu and the viewer ----------
@@ -52,7 +56,7 @@ def open_with(p, hwnd=None):
 
 
 class ThumbWorker(QThread):
-    ready = Signal(str, QImage)
+    ready = Signal(str, QImage, float)  # path, thumbnail, video length in seconds (0 for images)
 
     def __init__(self, paths, cache):
         super().__init__()
@@ -74,18 +78,24 @@ class ThumbWorker(QThread):
             if self._stop:
                 return
             try:
-                img = self.make(Path(p))
+                img, dur = self.make(Path(p))
             except Exception:
-                img = None
+                img, dur = None, 0.0
             if img is not None and not img.isNull():
-                self.ready.emit(p, img)
+                self.ready.emit(p, img, dur)
 
     def make(self, p):
-        c = self.cache / f"{p.name}_{int(p.stat().st_mtime)}.jpg"
-        if c.exists():
-            return QImage(str(c))
-        if p.suffix.lower() in VID:
+        vid, dur, cap = p.suffix.lower() in VID, 0.0, None
+        if vid:
             cap = cv2.VideoCapture(str(p))
+            fps, n = cap.get(cv2.CAP_PROP_FPS) or 0, cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            dur = n / fps if fps > 0 and n > 0 else 0.0
+        c = self.cache / f"{p.name}_{int(p.stat().st_mtime)}_v2.jpg"
+        if c.exists():
+            if cap:
+                cap.release()
+            return QImage(str(c)), dur
+        if vid:
             cap.set(cv2.CAP_PROP_POS_MSEC, 500)
             ok, f = cap.read()
             if not ok:
@@ -93,7 +103,7 @@ class ThumbWorker(QThread):
                 ok, f = cap.read()
             cap.release()
             if not ok:
-                return None
+                return None, dur
             f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
             h, w = f.shape[:2]
             img = QImage(f.data, w, h, 3 * w, QImage.Format_RGB888).copy()
@@ -102,13 +112,13 @@ class ThumbWorker(QThread):
             r.setAutoTransform(True)
             sz = r.size()
             if sz.isValid():
-                r.setScaledSize(sz.scaled(TW * 2, TH * 2, Qt.KeepAspectRatio))
+                r.setScaledSize(sz.scaled(*THUMB, Qt.KeepAspectRatio))
             img = r.read()
         if img.isNull():
-            return None
-        img = img.scaled(TW * 2, TH * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            return None, dur
+        img = img.scaled(*THUMB, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         img.save(str(c), "JPG", 85)
-        return img
+        return img, dur
 
 
 _live = set()  # keeps a running OCR thread alive even if its viewer window gets closed
@@ -235,29 +245,37 @@ class Viewer(QWidget):
         self.words_ready = self.copy_pending = False
         self.note = QLabel()
         self.note.setWordWrap(True)
-        self.note.setContentsMargins(10, 0, 10, 6)
+        self.note.setContentsMargins(2, 0, 2, 0)
         self.note_timer = QTimer(self, singleShot=True)
         self.note_timer.timeout.connect(lambda: self.note.setText(""))
+        self.note.setObjectName("note")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setContentsMargins(12, 12, 12, 8)
+        lay.setSpacing(8)
+        panel = QFrame()
+        panel.setObjectName("panel")
+        pl = QVBoxLayout(panel)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
+        lay.addWidget(panel, 1)
 
         if self.is_video:
             from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer  # loaded only when a video is opened
             from PySide6.QtMultimediaWidgets import QVideoWidget
             target = QVideoWidget()
-            lay.addWidget(target, 1)
+            pl.addWidget(target, 1)
             self.player = QMediaPlayer(self)
             self.audio = QAudioOutput(self)
             self.player.setAudioOutput(self.audio)
             self.player.setVideoOutput(target)
             self.player.setSource(QUrl.fromLocalFile(path))
             ctl = QHBoxLayout()
-            ctl.setContentsMargins(8, 4, 8, 0)
+            ctl.setContentsMargins(12, 8, 12, 10)
             self.btn = QPushButton("Pause")
             self.sl = QSlider(Qt.Horizontal)
             ctl.addWidget(self.btn)
             ctl.addWidget(self.sl, 1)
-            lay.addLayout(ctl)
+            pl.addLayout(ctl)
             self.btn.clicked.connect(self._toggle)
             self.sl.sliderMoved.connect(self.player.setPosition)
             self.player.durationChanged.connect(lambda d: self.sl.setRange(0, d))
@@ -267,14 +285,14 @@ class Viewer(QWidget):
             self.pix = QPixmap(path)
             target = self.view = TextImageView(self.pix)
             self.view.changed.connect(self._sync_text_btn)
-            lay.addWidget(self.view, 1)
+            pl.addWidget(self.view, 1)
 
         for w in (self, target):  # right-click anywhere in the viewer
             w.setContextMenuPolicy(Qt.CustomContextMenu)
             w.customContextMenuRequested.connect(lambda p, w=w: self._menu(w.mapToGlobal(p)))
 
         bar = QHBoxLayout()
-        bar.setContentsMargins(8, 6, 8, 2)
+        bar.setContentsMargins(0, 0, 0, 0)
         for text, fn in self._actions():
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, f=fn: self._run(f))
@@ -400,6 +418,10 @@ class Viewer(QWidget):
         QGuiApplication.clipboard().setText(txt)
         self._say("Copied selected text" if sel else "Copied all recognised text")
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        theme.style_titlebar(self)
+
     # ---------- playback ----------
     def _toggle(self):
         from PySide6.QtMultimedia import QMediaPlayer
@@ -424,100 +446,375 @@ class Viewer(QWidget):
         super().closeEvent(e)
 
 
+def fmt_size(n):
+    if n < 1024 ** 2:
+        return f"{max(1, round(n / 1024))} KB"
+    return f"{n / 1024 ** 2:.1f} MB" if n < 1024 ** 3 else f"{n / 1024 ** 3:.2f} GB"
+
+
+def fmt_dur(s):
+    m, s = divmod(int(round(s)), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def fmt_when(ts):
+    """'Oct 26 · 6:44 PM' (the year is added only for captures from earlier years)."""
+    dt = datetime.fromtimestamp(ts)
+    day = f"{dt:%b} {dt.day}" + ("" if dt.year == datetime.now().year else f", {dt.year}")
+    return f"{day} · {dt.strftime('%I:%M %p').lstrip('0')}"
+
+
+R_PATH = Qt.UserRole
+R_KEY, R_PIX, R_DUR, R_META, R_VID = (Qt.UserRole + i for i in range(1, 6))
+
+
+class CardDelegate(QStyledItemDelegate):
+    """Paints one media card: uniform preview well, title underneath, time/size and a type icon."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.cell, self.prev_h = QSize(300, 280), 180
+
+    def sizeHint(self, opt, idx):
+        return self.cell
+
+    def paint(self, p, opt, idx):
+        P = PAL
+        r = QRectF(opt.rect.adjusted(0, 0, -GAP, -GAP))
+        sel, hov = bool(opt.state & QStyle.State_Selected), bool(opt.state & QStyle.State_MouseOver)
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        card = QPainterPath()
+        card.addRoundedRect(r.adjusted(0.75, 0.75, -0.75, -0.75), 14, 14)
+        p.fillPath(card, QColor(P["card_hover"] if hov and not sel else P["card"]))
+        p.setPen(QPen(QColor(P["accent"] if sel else P["card_line"]), 1.5 if sel else 1))
+        p.drawPath(card)
+
+        prev = QRectF(r.x() + PAD, r.y() + PAD, r.width() - 2 * PAD, self.prev_h)
+        pix = idx.data(R_PIX)
+        if isinstance(pix, QPixmap) and not pix.isNull():
+            s = min(prev.width() / pix.width(), prev.height() / pix.height(), 2.0)
+            w, h = pix.width() * s, pix.height() * s
+            t = QRectF(prev.x() + (prev.width() - w) / 2, prev.y() + (prev.height() - h) / 2, w, h)
+            clip = QPainterPath()
+            clip.addRoundedRect(t, 10, 10)
+            p.save()
+            p.setClipPath(clip)
+            p.drawPixmap(t, pix, QRectF(pix.rect()))
+            p.restore()
+            p.setPen(QPen(QColor(P["card_line"]), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(clip)
+        else:
+            ph = QPainterPath()
+            ph.addRoundedRect(prev, 10, 10)
+            p.fillPath(ph, QColor(P["thumb_ph"]))
+
+        vid = bool(idx.data(R_VID))
+        if vid:  # play badge with the video length
+            dur = idx.data(R_DUR) or ""
+            f = QFont(opt.font)
+            f.setPixelSize(12)
+            f.setWeight(QFont.Medium)
+            tw = QFontMetrics(f).horizontalAdvance(dur) if dur else 0
+            bw, bh = (tw + 34) if dur else 30, 24
+            b = QRectF(prev.right() - 8 - bw, prev.bottom() - 8 - bh, bw, bh)
+            bp = QPainterPath()
+            bp.addRoundedRect(b, 8, 8)
+            p.fillPath(bp, QColor(8, 10, 18, 205))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#FFFFFF"))
+            p.drawPolygon(QPolygonF([QPointF(b.x() + 10, b.y() + 7), QPointF(b.x() + 10, b.y() + 17),
+                                     QPointF(b.x() + 18, b.y() + 12)]))
+            if dur:
+                p.setFont(f)
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(QRectF(b.x() + 24, b.y(), tw + 8, bh), Qt.AlignVCenter | Qt.AlignLeft, dur)
+
+        tx, ty, tw_ = r.x() + 14, prev.bottom() + 10, r.width() - 28
+        f = QFont(opt.font)
+        f.setPixelSize(13)
+        f.setWeight(QFont.Medium)
+        p.setFont(f)
+        p.setPen(QColor(P["text"]))
+        name = QFontMetrics(f).elidedText(idx.data(Qt.DisplayRole) or "", Qt.ElideRight, int(tw_))
+        p.drawText(QRectF(tx, ty, tw_, 20), Qt.AlignVCenter | Qt.AlignLeft, name)
+        f2 = QFont(opt.font)
+        f2.setPixelSize(12)
+        p.setFont(f2)
+        p.setPen(QColor(P["muted"]))
+        meta = QFontMetrics(f2).elidedText(idx.data(R_META) or "", Qt.ElideRight, int(tw_ - 24))
+        p.drawText(QRectF(tx, ty + 24, tw_ - 24, 18), Qt.AlignVCenter | Qt.AlignLeft, meta)
+        p.drawPixmap(int(r.right() - 14 - 16), int(ty + 25), theme.pixmap("video" if vid else "image", P["muted"], 16))
+        p.restore()
+
+
+class GridList(QListWidget):
+    resized = Signal()
+    empty_text = ""
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.resized.emit()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.count() == 0 and self.empty_text:
+            p = QPainter(self.viewport())
+            p.setPen(QColor(PAL["dim"]))
+            p.drawText(self.viewport().rect(), Qt.AlignCenter, self.empty_text)
+
+
+class ActionButton(QPushButton):
+    """Large rounded button: icon, bold label, and the shortcut in small text underneath."""
+
+    def __init__(self, icon_name, title):
+        super().__init__()
+        self.setObjectName("actionBtn")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(44)
+        self.icon_name = icon_name
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 0, 18, 0)
+        lay.setSpacing(10)
+        self.ico = QLabel()
+        self.ico.setFixedSize(20, 20)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+        self.title, self.hint = QLabel(title), QLabel()
+        self.title.setObjectName("actionTitle")
+        self.hint.setObjectName("actionHint")
+        col.addWidget(self.title)
+        col.addWidget(self.hint)
+        lay.addWidget(self.ico)
+        lay.addLayout(col)
+        for w in (self.ico, self.title, self.hint):
+            w.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.retheme()
+
+    def sizeHint(self):
+        return self.layout().sizeHint()
+
+    def set_hint(self, text):
+        self.hint.setText(text)
+        self.hint.setVisible(bool(text))
+
+    def retheme(self):
+        self.ico.setPixmap(theme.pixmap(self.icon_name, PAL["text"], 20))
+
+
+class IconButton(QPushButton):
+    def __init__(self, icon_name, tip):
+        super().__init__()
+        self.setObjectName("iconBtn")
+        self.setFixedSize(44, 44)
+        self.setIconSize(QSize(20, 20))
+        self.setToolTip(tip)
+        self.setCursor(Qt.PointingHandCursor)
+        self.icon_name = icon_name
+        self.retheme()
+
+    def retheme(self):
+        self.setIcon(QIcon(theme.pixmap(self.icon_name, PAL["icon"], 20)))
+
+
+class ClickLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+
+
 class Library(QMainWindow):
     def __init__(self, app):
         super().__init__()
         self.app, self.st = app, app.st
         self.workers, self.viewers, self.items, self.icons = [], [], {}, {}
         self.dirty = True
-        self.setWindowTitle(f"{APP} — Library")
+        self.setWindowTitle(APP)
         self.setWindowIcon(make_icon())
-        self.resize(1100, 720)
+        self.setMinimumSize(980, 560)
+        self.resize(1180, 760)
 
-        tb = QToolBar()
-        tb.setMovable(False)
-        self.addToolBar(tb)
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        def tool(text, fn):
-            tb.addAction(text).triggered.connect(lambda _=False: fn())
-
-        tool("📷 Capture", lambda: self._cap("image"))
-        tool("🎬 Record", lambda: self._cap("video"))
-        tb.addSeparator()
-        self.search = QLineEdit(placeholderText="Search file names and text in screenshots…")
+        # --- top bar: capture / record / save replay, search, tools ---
+        bar = QHBoxLayout()
+        bar.setContentsMargins(14, 8, 14, 12)
+        bar.setSpacing(10)
+        self.b_cap, self.b_rec, self.b_rep = (ActionButton("capture", "Capture"), ActionButton("record", "Record"),
+                                              ActionButton("replay", "Save replay"))
+        self.b_cap.clicked.connect(lambda: self._cap("image"))
+        self.b_rec.clicked.connect(lambda: self._cap("video"))
+        self.b_rep.clicked.connect(self.app.save_replay)
+        for b in (self.b_cap, self.b_rec, self.b_rep):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search names and text in screenshots")
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(300)
-        self.kind = QComboBox()
-        self.kind.addItems(["All", "Images", "Videos"])
-        tb.addWidget(self.search)
-        tb.addWidget(self.kind)
-        self.sort = QComboBox()
-        for label, data in (("Date created", "date"), ("Name", "name"), ("File type", "type")):
-            self.sort.addItem(label, data)
-        self.sort.setCurrentIndex(max(0, self.sort.findData(self.st["sort_key"])))
-        self.dir_btn = QPushButton()
-        self.dir_btn.setToolTip("Reverse the sort order")
-        self._dir_text()
-        tb.addWidget(QLabel("  Sort: "))
-        tb.addWidget(self.sort)
-        tb.addWidget(self.dir_btn)
-        self.sort.currentIndexChanged.connect(self._sort_changed)
-        self.dir_btn.clicked.connect(self._flip)
-        tb.addSeparator()
-        tool("Refresh", self.hard_refresh)
-        tool("Open folder", lambda: os.startfile(self.st.storage()))
-        tool("⚙ Settings", app.open_settings)
+        self.search.setFixedSize(300, 44)
+        self.search_act = self.search.addAction(QIcon(theme.pixmap("search", PAL["dim"], 18)), QLineEdit.LeadingPosition)
+        bar.addWidget(self.search)
+        self.icon_btns = []
+        for name, tip, fn in (("refresh", "Refresh", self.hard_refresh),
+                              ("folder", "Open media folder", lambda: os.startfile(self.st.storage())),
+                              ("settings", "Settings", app.open_settings)):
+            b = IconButton(name, tip)
+            b.clicked.connect(lambda _=False, f=fn: f())
+            bar.addWidget(b)
+            self.icon_btns.append(b)
+        root.addLayout(bar)
 
-        self.lst = QListWidget()
+        # --- main panel: filter tabs + sort, then the card grid ---
+        self.panel = QFrame()
+        self.panel.setObjectName("panel")
+        pl = QVBoxLayout(self.panel)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
+        hdr = QHBoxLayout()
+        hdr.setContentsMargins(24, 18, 24, 0)
+        hdr.setSpacing(6)
+        self.tabs, self.tab_btns = QButtonGroup(self), []
+        for i in range(3):
+            b = QPushButton()
+            b.setObjectName("tab")
+            b.setCheckable(True)
+            b.setFixedHeight(36)
+            b.setCursor(Qt.PointingHandCursor)
+            self.tabs.addButton(b, i)
+            hdr.addWidget(b)
+            self.tab_btns.append(b)
+        self.tab_btns[0].setChecked(True)
+        hdr.addStretch(1)
+        self.sort_btn = QPushButton("Date created")
+        self.sort_btn.setObjectName("sortBtn")
+        self.sort_btn.setFixedHeight(36)
+        self.sort_btn.setCursor(Qt.PointingHandCursor)
+        self.sort_btn.clicked.connect(self._flip)
+        hdr.addWidget(self.sort_btn)
+        pl.addLayout(hdr)
+
+        self.lst = GridList()
+        self.lst.setObjectName("grid")
+        self.delegate = CardDelegate(self.lst)
+        self.lst.setItemDelegate(self.delegate)
         self.lst.setViewMode(QListView.IconMode)
-        self.lst.setIconSize(QSize(TW, TH))
-        self.lst.setGridSize(QSize(TW + 24, TH + 48))
-        self.lst.setUniformItemSizes(True)
         self.lst.setResizeMode(QListView.Adjust)
         self.lst.setMovement(QListView.Static)
+        self.lst.setSpacing(0)
         self.lst.setSelectionMode(QListWidget.ExtendedSelection)
-        self.lst.setWordWrap(True)
-        self.lst.setTextElideMode(Qt.ElideMiddle)
+        self.lst.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.lst.setMouseTracking(True)
+        self.lst.setFrameShape(QFrame.NoFrame)
         self.lst.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lst.customContextMenuRequested.connect(self._menu)
-        self.lst.itemDoubleClicked.connect(lambda it: self.open_path(it.data(Qt.UserRole)))
+        self.lst.itemDoubleClicked.connect(lambda it: self.open_path(it.data(R_PATH)))
+        self.lst.resized.connect(self._relayout)
         QShortcut(QKeySequence(Qt.Key_Delete), self.lst, activated=lambda: self.delete(self._sel()))
-        self.setCentralWidget(self.lst)
-        self.status = QLabel()
-        self.statusBar().addWidget(self.status)
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(24, 14, 4, 0)  # right margin is smaller: each card carries a trailing gap
+        wrap.addWidget(self.lst)
+        pl.addLayout(wrap, 1)
+        pw = QHBoxLayout()
+        pw.setContentsMargins(12, 0, 12, 0)
+        pw.addWidget(self.panel)
+        root.addLayout(pw, 1)
 
-        ph = QPixmap(TW, TH)
-        ph.fill(QColor("#d8d8d8"))
-        self.ph_icon = QIcon(ph)
+        # --- bottom bar: item count, folder size, replay buffer status ---
+        sb = QHBoxLayout()
+        sb.setContentsMargins(20, 0, 20, 0)
+        self.status = QLabel()
+        self.status.setObjectName("status")
+        self.status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.replay_lbl = ClickLabel()
+        self.replay_lbl.setObjectName("status")
+        self.replay_lbl.setCursor(Qt.PointingHandCursor)
+        self.replay_lbl.setToolTip("Click to start or stop the replay buffer")
+        self.replay_lbl.clicked.connect(self._toggle_replay)
+        sb.addWidget(self.status, 1)
+        sb.addWidget(self.replay_lbl)
+        status_row = QWidget()
+        status_row.setFixedHeight(34)
+        status_row.setLayout(sb)
+        root.addWidget(status_row)
+
         # every refresh request funnels through this one debounced timer, so overlapping triggers
         # (capture finished + folder watcher + search typing) collapse into a single rebuild
         self.debounce = QTimer(self, singleShot=True, interval=200)
         self.debounce.timeout.connect(self._do_refresh)
         self.search.textChanged.connect(lambda _: self.debounce.start())
-        self.kind.currentIndexChanged.connect(lambda _: self.debounce.start())
+        self.tabs.idClicked.connect(lambda _: self.debounce.start())
+        self.rtimer = QTimer(self, interval=1500)  # only runs while the window is visible
+        self.rtimer.timeout.connect(self._replay_status)
         self._sig = None  # what the grid currently shows; identical rebuild requests are skipped
         self.fsw = QFileSystemWatcher(self)
         self.fsw.directoryChanged.connect(lambda _: self.debounce.start())
+        app.theme.changed.connect(self.retheme)
+        self.refresh_hints()
+        self._sort_icon()
+        self._replay_status()
         self.set_folder()
 
-    # ---------- sorting ----------
-    def _dir_text(self):
-        d, k = self.st["sort_desc"], self.sort.currentData()
-        self.dir_btn.setText(("Newest first" if d else "Oldest first") if k == "date"
-                             else ("Z → A" if d else "A → Z"))
+    # ---------- look ----------
+    def retheme(self):
+        for b in (self.b_cap, self.b_rec, self.b_rep, *self.icon_btns):
+            b.retheme()
+        self.search_act.setIcon(QIcon(theme.pixmap("search", PAL["dim"], 18)))
+        self._sort_icon()
+        self._replay_status()
+        self.lst.viewport().update()
 
-    def _sort_changed(self):
-        k = self.sort.currentData()
-        self.st["sort_key"], self.st["sort_desc"] = k, (k == "date")  # sensible default direction per key
-        self.st.save()
-        self._dir_text()
-        self.refresh()
+    def refresh_hints(self):
+        """Shows the current shortcuts on the three big buttons."""
+        self.b_cap.set_hint(self.st["hk_image"])
+        self.b_rec.set_hint(self.st["hk_video"])
+        self.b_rep.set_hint(self.st["hk_replay"])
+
+    def _sort_icon(self):
+        desc = bool(self.st["sort_desc"])
+        self.sort_btn.setIcon(QIcon(theme.pixmap("sort_down" if desc else "sort_up", PAL["sort_text"], 16)))
+        self.sort_btn.setToolTip("Newest first (click to reverse)" if desc else "Oldest first (click to reverse)")
 
     def _flip(self):
         self.st["sort_desc"] = not self.st["sort_desc"]
         self.st.save()
-        self._dir_text()
+        self._sort_icon()
         self.refresh()
+
+    def _replay_status(self):
+        on = self.app.replay.running
+        col = PAL["good"] if on else PAL["dim"]
+        txt = (f"Replay buffer on · last {self.st['replay_seconds']} s" if on
+               else "Replay buffer off · click to start")
+        self.replay_lbl.setText(f"<span style='color:{col}'>●</span>&nbsp;&nbsp;{txt}")
+
+    def _toggle_replay(self):
+        self.app.toggle_replay()
+        self._replay_status()
+
+    def _relayout(self):
+        """Sizes the cards so each row fills the width evenly (about four across on a normal window)."""
+        # Qt lays icons out inside the viewer width minus the scroll bar's width, whether or not it is showing
+        w = (self.lst.maximumViewportSize().width()
+             - self.lst.style().pixelMetric(QStyle.PM_ScrollBarExtent, None, self.lst.verticalScrollBar()))
+        w -= 4  # a few px of slack: Qt wraps a row if it fits to the pixel
+        if w < 100:
+            return
+        cell_w = w // max(1, w // MIN_CELL)
+        prev_h = int((cell_w - GAP - 2 * PAD) * RATIO)
+        cell = QSize(cell_w, PAD + prev_h + INFO_H + GAP)
+        if cell != self.delegate.cell:
+            self.delegate.cell, self.delegate.prev_h = cell, prev_h
+            self.lst.setGridSize(cell)
+            self.lst.viewport().update()
 
     # ---------- refresh ----------
     def refresh(self):
@@ -537,8 +834,17 @@ class Library(QMainWindow):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self.app.theme.sync()  # pick up a Windows light/dark change made while we were hidden
+        theme.style_titlebar(self)
+        self._replay_status()
+        self.rtimer.start()
+        self._relayout()
         if self.dirty:  # changes that arrived while the window was hidden
             self.debounce.start()
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self.rtimer.stop()
 
     def _do_refresh(self):
         if not self.isVisible():
@@ -547,7 +853,7 @@ class Library(QMainWindow):
         self.dirty = False
         d = self.st.storage()
         q = self.search.text().lower().strip()
-        k = self.kind.currentIndex()
+        k = self.tabs.checkedId()
         idx = ocr.load_index(self.st) if q else {}
         files = []
         for p in d.iterdir():
@@ -555,42 +861,53 @@ class Library(QMainWindow):
                 if p.is_file() and p.suffix.lower() in IMG | VID:
                     stt = p.stat()
                     created = stt.st_birthtime if hasattr(stt, "st_birthtime") else stt.st_ctime
-                    files.append((p, stt.st_mtime, created))
+                    files.append((p, stt.st_mtime, created, stt.st_size))
             except OSError:
                 pass
-        keyf = {"date": lambda t: t[2], "name": lambda t: t[0].name.lower(),
-                "type": lambda t: (t[0].suffix.lower(), t[0].name.lower())}[self.sort.currentData()]
-        files.sort(key=keyf, reverse=bool(self.st["sort_desc"]))
-        sig = (q, k, self.sort.currentData(), bool(self.st["sort_desc"]), len(idx),
-               tuple((str(p), mt) for p, mt, _c in files))
+        files.sort(key=lambda t: t[2], reverse=bool(self.st["sort_desc"]))  # date created
+        sig = (q, k, bool(self.st["sort_desc"]), len(idx), tuple((str(p), mt) for p, mt, _c, _s in files))
         if sig == self._sig:  # nothing visible changed (e.g. a folder-watcher ping): don't rebuild the grid
             return
         self._sig = sig
         log(f"library rebuilt ({len(files)} files)")
 
+        counts, shown = [0, 0, 0], []  # all / images / videos that match the search
+        for p, mt, created, size in files:
+            vid = p.suffix.lower() in VID
+            if q and q not in p.name.lower() and q not in idx.get(p.name, "").lower():
+                continue
+            counts[0] += 1
+            counts[2 if vid else 1] += 1
+            if (k == 1 and vid) or (k == 2 and not vid):
+                continue
+            shown.append((p, mt, created, size, vid))
+        for b, name, n in zip(self.tab_btns, ("All captures", "Images", "Videos"), counts):
+            b.setText(f"{name}  {n}")
+
         self.lst.setUpdatesEnabled(False)
         try:
             self.lst.clear()
             self.items, todo = {}, []
-            for p, mt, _created in files:
-                vid = p.suffix.lower() in VID
-                if (k == 1 and vid) or (k == 2 and not vid):
-                    continue
-                if q and q not in p.name.lower() and q not in idx.get(p.name, "").lower():
-                    continue
+            for p, mt, created, size, vid in shown:
                 key = f"{p}|{int(mt)}"
-                icon = self.icons.get(key)
-                it = QListWidgetItem(icon or self.ph_icon, p.name)
-                it.setData(Qt.UserRole, str(p))
-                it.setData(Qt.UserRole + 1, key)
+                it = QListWidgetItem(p.name)
+                it.setData(R_PATH, str(p))
+                it.setData(R_KEY, key)
+                it.setData(R_VID, vid)
+                it.setData(R_META, f"{fmt_when(created)} · {fmt_size(size)}")
                 it.setToolTip(str(p))
+                cached = self.icons.get(key)
+                if cached:
+                    it.setData(R_PIX, cached[0])
+                    it.setData(R_DUR, cached[1])
+                else:
+                    todo.append(str(p))
                 self.lst.addItem(it)
                 self.items[str(p)] = it
-                if icon is None:
-                    todo.append(str(p))
-            count = self.lst.count()
         finally:
             self.lst.setUpdatesEnabled(True)
+        self.lst.empty_text = "No matches" if q else "No captures yet."
+        self._relayout()
         self.lst.viewport().update()
 
         for w in self.workers:
@@ -601,27 +918,18 @@ class Library(QMainWindow):
             w.ready.connect(self._thumb)
             self.workers.append(w)
             w.start()
-        self.status.setText(f"{count} items — {d}")
+        total = fmt_size(sum(s for _p, _m, _c, s in files))
+        shown_txt = f"{len(shown)} items" if counts[0] == len(files) and k == 0 else f"{len(shown)} of {len(files)} items"
+        self.status.setText(f"{shown_txt} · {total} — {d}")
 
-    def _thumb(self, path, img):
+    def _thumb(self, path, img, dur):
         it = self.items.get(path)
         if not it:
             return
-        pm = QPixmap.fromImage(img).scaled(TW, TH, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        if Path(path).suffix.lower() in VID:
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.Antialiasing)
-            p.setBrush(QColor(0, 0, 0, 160))
-            p.setPen(Qt.NoPen)
-            c = pm.rect().center()
-            p.drawEllipse(c, 22, 22)
-            p.setBrush(Qt.white)
-            p.drawPolygon(QPolygon([QPoint(c.x() - 7, c.y() - 12), QPoint(c.x() - 7, c.y() + 12),
-                                    QPoint(c.x() + 13, c.y())]))
-            p.end()
-        icon = QIcon(pm)
-        self.icons[it.data(Qt.UserRole + 1)] = icon
-        it.setIcon(icon)
+        pm, d = QPixmap.fromImage(img), (fmt_dur(dur) if dur > 0 else "")
+        self.icons[it.data(R_KEY)] = (pm, d)
+        it.setData(R_PIX, pm)
+        it.setData(R_DUR, d)
 
     # ---------- window / actions ----------
     def _cap(self, base):
@@ -640,7 +948,7 @@ class Library(QMainWindow):
         self.open_path(path)
 
     def _sel(self):
-        return [i.data(Qt.UserRole) for i in self.lst.selectedItems()]
+        return [i.data(R_PATH) for i in self.lst.selectedItems()]
 
     def _menu(self, pos):
         paths = self._sel()

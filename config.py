@@ -34,6 +34,7 @@ DEFAULTS = {
     "ocr": False,
     "ocr_lang": "eng",
     "notify_capture": True,
+    "theme": "dark",
     "sort_key": "date",
     "sort_desc": True,
     "tesseract_path": "",

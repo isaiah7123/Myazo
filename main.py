@@ -20,6 +20,7 @@ from icon import make_icon, make_pixmap
 from ocr import ocr_async
 from recorder import Recorder, ReplayBuffer
 from log import LOG, install_excepthooks, log
+from theme import ThemeManager
 from toast import register as register_integration, show_saved
 
 def trim_memory():
@@ -82,6 +83,8 @@ class SnapApp(QObject):
         super().__init__()
         self.qapp = qapp
         self.st = Settings()
+        self.theme = ThemeManager(qapp, self.st)  # light / dark / follow Windows
+        self.theme.apply()
         self.picker = RegionPicker()
         self.rec = self.hud = self._cb = None
         self.rec_open = False
@@ -106,8 +109,7 @@ class SnapApp(QObject):
                                     f"@{s.devicePixelRatio()}" for s in QGuiApplication.screens()))
         CFG_DIR.mkdir(parents=True, exist_ok=True)
         icon_png = CFG_DIR / "icon.png"
-        if not icon_png.exists():
-            make_pixmap().save(str(icon_png))
+        make_pixmap().save(str(icon_png))  # rewritten each start so a changed logo always shows in notifications
         register_integration(icon_png)  # notification identity + myazo:// link used by the toast buttons
 
         self.hk = HotkeyManager()
@@ -154,8 +156,10 @@ class SnapApp(QObject):
             set_startup(self.st["start_with_windows"])
         except OSError:
             pass
+        self.theme.apply()
         if self._lib:
             self._lib.set_folder()
+            self._lib.refresh_hints()
         if self.replay.running:
             self.replay.stop()
             self.replay.start()
@@ -362,6 +366,7 @@ def main():
     hide_child_consoles()
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Myazo.App")
     qa = QApplication(sys.argv)
+    qa.setStyle("Fusion")  # consistent base for the Myazo stylesheet
     qa.setApplicationName(APP)
     qa.setQuitOnLastWindowClosed(False)
     qa.setWindowIcon(make_icon())

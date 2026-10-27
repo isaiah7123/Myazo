@@ -1,9 +1,10 @@
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+                               QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 
+import theme
 from config import APP, HOTKEYS
 
 
@@ -58,14 +59,18 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.st, self.w = st, {}
         self.setWindowTitle(f"{APP} Settings")
-        self.setMinimumWidth(640)
+        self.setMinimumSize(720, 560)
+        self.resize(760, 680)
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(12)
         tabs = QTabWidget()
         lay.addWidget(tabs)
         tabs.addTab(self._general(), "General")
         tabs.addTab(self._keys(), "Shortcut keys")
         tabs.addTab(self._more(), "More options")
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
@@ -94,6 +99,13 @@ class SettingsDialog(QDialog):
     def _general(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(20, 20, 20, 20)
+        v.setSpacing(10)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Theme"))
+        row.addWidget(self._combo("theme", [("Auto (match Windows)", "auto"), ("Light", "light"), ("Dark", "dark")]))
+        row.addStretch()
+        v.addLayout(row)
         v.addWidget(self._chk("keep_in_tray", "Keep Myazo running in the system tray when the window is closed"))
         v.addWidget(self._chk("start_with_windows", "Launch Myazo when Windows starts"))
         v.addWidget(self._chk("open_after_capture", "Open in app after capture (tray menu and PrintScreen captures)"))
@@ -113,6 +125,8 @@ class SettingsDialog(QDialog):
     def _keys(self):
         w = QWidget()
         g = QGridLayout(w)
+        g.setContentsMargins(20, 20, 20, 20)
+        g.setVerticalSpacing(10)
         g.addWidget(QLabel("<b>Capture in background</b>"), 0, 1)
         g.addWidget(QLabel("<b>Capture, then open in app</b>"), 0, 2)
         for r, (k, label, _a, b) in enumerate(HOTKEYS, 1):
@@ -125,7 +139,8 @@ class SettingsDialog(QDialog):
                 h.setContentsMargins(0, 0, 0, 0)
                 e = HotkeyEdit()
                 x = QPushButton("✕")
-                x.setFixedWidth(28)
+                x.setFixedWidth(30)
+                x.setObjectName("clearBtn")
                 x.clicked.connect(e.clear)
                 h.addWidget(e)
                 h.addWidget(x)
@@ -138,6 +153,7 @@ class SettingsDialog(QDialog):
     def _more(self):
         w = QWidget()
         v = QVBoxLayout(w)
+        v.setContentsMargins(16, 6, 16, 16)
 
         box = QGroupBox("Library")
         f = QFormLayout(box)
@@ -175,7 +191,15 @@ class SettingsDialog(QDialog):
         f.addRow(self._chk("replay_normalize", "Enable volume normalization"))
         f.addRow(self._chk("replay_autostart", "Start the replay buffer when Myazo launches"))
         v.addWidget(box)
-        return w
+        sa = QScrollArea()  # this page is tall: let it scroll instead of stretching the dialog
+        sa.setWidgetResizable(True)
+        sa.setFrameShape(QFrame.NoFrame)
+        sa.setWidget(w)
+        return sa
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        theme.style_titlebar(self)
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Choose media storage location", self.w["storage_dir"].text())
